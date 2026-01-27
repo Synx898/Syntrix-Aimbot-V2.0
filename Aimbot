@@ -1,0 +1,1519 @@
+-- ========================================
+-- SYNTRIX AIMBOT V2.0 - COMPLETE REWRITE
+-- Modern Architecture | WindUI Integration
+-- ========================================
+
+-- ========================================
+-- SECTION 1: SERVICES
+-- ========================================
+local Services = {
+    Players = game:GetService("Players"),
+    UserInput = game:GetService("UserInputService"),
+    RunService = game:GetService("RunService"),
+    StarterGui = game:GetService("StarterGui"),
+    TweenService = game:GetService("TweenService"),
+    HttpService = game:GetService("HttpService"),
+    VirtualUser = game:GetService("VirtualUser"),
+}
+
+local Client = {
+    Player = Services.Players.LocalPlayer,
+    Mouse = Services.Players.LocalPlayer:GetMouse(),
+    Camera = workspace.CurrentCamera,
+    Character = Services.Players.LocalPlayer.Character or Services.Players.LocalPlayer.CharacterAdded:Wait(),
+}
+
+-- Update character reference on respawn
+Services.Players.LocalPlayer.CharacterAdded:Connect(function(char)
+    Client.Character = char
+end)
+
+-- ========================================
+-- SECTION 2: CONFIGURATION
+-- ========================================
+local Config = {
+    -- Aimbot Settings
+    Aimbot = {
+        Enabled = false,
+        TargetPart = "Head",
+        Radius = 30,
+        Smoothing = false,
+        SmoothAmount = 0.2,
+        Prediction = false,
+        PredictionMultiplier = 6.612,
+        ShowFOV = false,
+        LockKey = "Q",
+    },
+    
+    -- Triggerbot Settings
+    Triggerbot = {
+        Enabled = false,
+        Delay = 50, -- milliseconds
+        WallCheck = true,
+        DoubleActivation = true, -- Fire twice for higher rate
+    },
+    
+    -- ESP Settings
+    ESP = {
+        Enabled = false,
+        ShowNames = true,
+        ShowDistance = true,
+        ShowHealth = true,
+        ShowBoxes = false,
+        ShowTracers = false,
+        TracerOrigin = "Bottom", -- "Bottom", "Middle", "Top"
+        UseTeamColors = true,
+        CustomColor = Color3.fromRGB(255, 255, 255),
+    },
+    
+    -- Filter Settings
+    Filters = {
+        TeamCheck = false,
+        UseWhitelist = false,
+        Whitelist = {},
+        Blacklist = {},
+    },
+    
+    -- FOV Settings
+    FOV = {
+        Enabled = false,
+        Value = 70,
+    },
+    
+    -- Anti-AFK
+    AntiAFK = {
+        Enabled = false,
+    },
+    
+    -- Misc
+    Misc = {
+        DiscordLink = "https://discord.gg/xFSuyEyTM7",
+        Debug = false,
+    },
+}
+
+-- ========================================
+-- SECTION 3: STATE MANAGEMENT
+-- ========================================
+local State = {
+    -- Aimbot State
+    Aimbot = {
+        Active = false,
+        CurrentTarget = nil,
+        FOVCircle = nil,
+    },
+    
+    -- ESP State
+    ESP = {
+        Objects = {}, -- [Player] = {Highlight, Billboard, Tracer, etc}
+    },
+    
+    -- Device Detection
+    Device = {
+        IsMobile = Services.UserInput.TouchEnabled and not Services.UserInput.KeyboardEnabled,
+    },
+}
+
+-- ========================================
+-- SECTION 4: UTILITIES
+-- ========================================
+local Utils = {}
+
+-- Notification Helper
+function Utils.Notify(title, message, duration)
+    pcall(function()
+        Services.StarterGui:SetCore("SendNotification", {
+            Title = title,
+            Text = message,
+            Duration = duration or 3,
+        })
+    end)
+end
+
+-- Check if player is alive
+function Utils.IsPlayerAlive(player)
+    if not player or not player.Character then return false end
+    
+    local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return false end
+    if humanoid.Health <= 0 then return false end
+    if humanoid:GetState() == Enum.HumanoidStateType.Dead then return false end
+    
+    return true
+end
+
+-- Check if target is visible (raycast wall check)
+function Utils.IsTargetVisible(player)
+    if not player or not player.Character then return false end
+    if not Client.Character then return false end
+    
+    local targetPart = player.Character:FindFirstChild(Config.Aimbot.TargetPart) or player.Character:FindFirstChild("Head")
+    local originPart = Client.Character:FindFirstChild("Head") or Client.Character:FindFirstChild("HumanoidRootPart")
+    
+    if not targetPart or not originPart then return false end
+    
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterDescendantsInstances = {Client.Character, player.Character}
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    raycastParams.IgnoreWater = true
+    
+    local rayResult = workspace:Raycast(originPart.Position, (targetPart.Position - originPart.Position), raycastParams)
+    
+    return rayResult == nil -- No obstruction
+end
+
+-- Get team color
+function Utils.GetTeamColor(player)
+    if player.Team then
+        return player.Team.TeamColor.Color
+    end
+    return Color3.fromRGB(255, 255, 255)
+end
+
+-- Calculate distance between two points
+function Utils.GetDistance(pos1, pos2)
+    return (pos1 - pos2).Magnitude
+end
+
+-- World to screen conversion
+function Utils.WorldToScreen(position)
+    local screenPos, onScreen = Client.Camera:WorldToViewportPoint(position)
+    return Vector2.new(screenPos.X, screenPos.Y), onScreen
+end
+
+-- ========================================
+-- SECTION 5: FILTER SYSTEM
+-- ========================================
+local FilterSystem = {}
+
+-- Check if player passes all filters
+function FilterSystem.PassesFilters(player)
+    if player == Client.Player then return false end
+    if not Utils.IsPlayerAlive(player) then return false end
+    
+    -- Blacklist check
+    if Config.Filters.Blacklist[player.Name] then return false end
+    
+    -- Whitelist check
+    if Config.Filters.UseWhitelist then
+        if not Config.Filters.Whitelist[player.Name] then return false end
+    end
+    
+    -- Team check
+    if Config.Filters.TeamCheck then
+        if player.Team == Client.Player.Team then return false end
+    end
+    
+    return true
+end
+
+-- ========================================
+-- SECTION 6: TARGETING SYSTEM
+-- ========================================
+local TargetingSystem = {}
+
+-- Get target part position
+function TargetingSystem.GetTargetPartPosition(player)
+    if not player or not player.Character then return nil end
+    
+    local part = player.Character:FindFirstChild(Config.Aimbot.TargetPart)
+    if not part then return nil end
+    
+    return part.Position
+end
+
+-- Get target part with prediction
+function TargetingSystem.GetPredictedPosition(player)
+    if not player or not player.Character then return nil end
+    
+    local part = player.Character:FindFirstChild(Config.Aimbot.TargetPart)
+    if not part then return nil end
+    
+    local position = part.Position
+    
+    if Config.Aimbot.Prediction then
+        local velocity = part.AssemblyLinearVelocity or part.Velocity
+        position = position + (velocity / Config.Aimbot.PredictionMultiplier)
+    end
+    
+    return position
+end
+
+-- Find nearest valid target within FOV
+function TargetingSystem.GetNearestTarget()
+    local nearestPlayer = nil
+    local shortestDistance = math.huge
+    
+    local mousePosition = Vector2.new(Client.Mouse.X, Client.Mouse.Y + 36)
+    
+    for _, player in pairs(Services.Players:GetPlayers()) do
+        if FilterSystem.PassesFilters(player) then
+            local targetPos = TargetingSystem.GetTargetPartPosition(player)
+            if targetPos then
+                local screenPos, onScreen = Utils.WorldToScreen(targetPos)
+                
+                if onScreen then
+                    local distance = (mousePosition - screenPos).Magnitude
+                    
+                    if distance <= Config.Aimbot.Radius and distance < shortestDistance then
+                        shortestDistance = distance
+                        nearestPlayer = player
+                    end
+                end
+            end
+        end
+    end
+    
+    return nearestPlayer
+end
+
+-- ========================================
+-- SECTION 7: AIMBOT SYSTEM
+-- ========================================
+local AimbotSystem = {}
+
+-- Constants
+local FOV_CIRCLE_CONFIG = {
+    Thickness = 2,
+    NumSides = 50,
+    Filled = false,
+    Transparency = 0.7,
+    Color = Color3.fromRGB(138, 43, 226)
+}
+
+local MOUSE_OFFSET = Vector2.new(0, 36)
+
+-- State validation
+local function IsAimbotReady()
+    return Config.Aimbot.Enabled 
+        and State.Aimbot.Active 
+        and State.Aimbot.CurrentTarget
+end
+
+-- Target management
+function AimbotSystem.ReleaseTarget()
+    State.Aimbot.CurrentTarget = nil
+    State.Aimbot.Active = false
+end
+
+function AimbotSystem.AcquireTarget()
+    local target = TargetingSystem.GetNearestTarget()
+    if not target then return false end
+    
+    State.Aimbot.CurrentTarget = target
+    State.Aimbot.Active = true -- ✅ SET THIS TO TRUE
+    return true
+end
+
+function AimbotSystem.Toggle()
+    if State.Aimbot.CurrentTarget then
+        AimbotSystem.ReleaseTarget()
+    else
+        local acquired = AimbotSystem.AcquireTarget()
+        if acquired then
+            State.Aimbot.Active = true -- ✅ THIS WAS MISSING
+        end
+    end
+end
+
+-- Camera control
+local function CalculateTargetCFrame(currentCF, targetPos)
+    return CFrame.new(currentCF.Position, targetPos)
+end
+
+local function ApplyCameraSmoothing(currentCF, targetCF)
+    if Config.Aimbot.Smoothing then
+        return currentCF:Lerp(targetCF, Config.Aimbot.SmoothAmount)
+    end
+    return targetCF
+end
+
+function AimbotSystem.LockToTarget()
+    if not IsAimbotReady() then return end
+    
+    local targetPosition = TargetingSystem.GetPredictedPosition(State.Aimbot.CurrentTarget)
+    if not targetPosition then
+        AimbotSystem.ReleaseTarget()
+        return
+    end
+    
+    local currentCF = Client.Camera.CFrame
+    local targetCF = CalculateTargetCFrame(currentCF, targetPosition)
+    Client.Camera.CFrame = ApplyCameraSmoothing(currentCF, targetCF)
+end
+
+-- FOV Circle management
+local function GetMousePosition()
+    return Vector2.new(Client.Mouse.X, Client.Mouse.Y) + MOUSE_OFFSET
+end
+
+function AimbotSystem.CreateFOVCircle()
+    local success, err = pcall(function()
+        -- Clean up existing circle
+        if State.Aimbot.FOVCircle then
+            State.Aimbot.FOVCircle:Remove()
+            State.Aimbot.FOVCircle = nil
+        end
+        
+        -- Create new circle with config
+        local circle = Drawing.new("Circle")
+        for property, value in pairs(FOV_CIRCLE_CONFIG) do
+            circle[property] = value
+        end
+        
+        -- Apply dynamic properties
+        circle.Radius = Config.Aimbot.Radius
+        circle.Visible = Config.Aimbot.ShowFOV
+        circle.Position = GetMousePosition()
+        
+        State.Aimbot.FOVCircle = circle
+    end)
+    
+    if not success then
+        warn("[AimbotSystem] Failed to create FOV circle:", err)
+        warn("[AimbotSystem] Drawing API may not be available")
+    end
+    
+    return success
+end
+
+function AimbotSystem.UpdateFOVCircle()
+    local circle = State.Aimbot.FOVCircle
+    if not circle then return end
+    
+    circle.Position = GetMousePosition()
+    circle.Radius = Config.Aimbot.Radius
+    circle.Visible = Config.Aimbot.ShowFOV
+end
+
+function AimbotSystem.CleanupFOVCircle()
+    if State.Aimbot.FOVCircle then
+        pcall(function()
+            State.Aimbot.FOVCircle:Remove()
+        end)
+        State.Aimbot.FOVCircle = nil
+    end
+end
+
+-- Input handling
+local function OnInputBegan(input, processed)
+    if processed then return end
+    
+    local lockKey = Config.Aimbot.LockKey:upper()
+    if input.KeyCode == Enum.KeyCode[lockKey] then
+        AimbotSystem.Toggle()
+    end
+end
+
+function AimbotSystem.SetupInput()
+    if State.Device.IsMobile then return end
+    
+    Services.UserInput.InputBegan:Connect(OnInputBegan)
+end
+
+-- Render loop
+local function OnRenderStep()
+    AimbotSystem.LockToTarget()
+    AimbotSystem.UpdateFOVCircle()
+end
+
+function AimbotSystem.SetupRenderLoop()
+    Services.RunService.RenderStepped:Connect(OnRenderStep)
+end
+
+-- Initialize aimbot system
+function AimbotSystem.Initialize()
+    AimbotSystem.CreateFOVCircle()
+    AimbotSystem.SetupInput()
+    AimbotSystem.SetupRenderLoop()
+    
+    -- Cleanup on disconnect
+    Services.Players.LocalPlayer.AncestryChanged:Connect(function()
+        AimbotSystem.CleanupFOVCircle()
+    end)
+end
+
+-- ========================================
+-- SECTION 8: TRIGGERBOT SYSTEM (FIXED)
+-- ========================================
+local TriggerbotSystem = {}
+
+-- Configuration
+local TRIGGERBOT_CONFIG = {
+    MinDelay = 0.01,
+    BurstDelay = 0.02,
+}
+
+-- Shooting method names (priority order)
+local REMOTE_KEYWORDS = {"fire", "shoot", "attack"}
+local MODULE_NAMES = {"GunScript", "WeaponScript", "ClientGun"}
+local MODULE_FUNCTIONS = {"Fire", "Shoot"}
+
+-- State validation
+local function CanShoot()
+    if not Config.Triggerbot.Enabled then return false end
+    if not State.Aimbot.CurrentTarget or not State.Aimbot.CurrentTarget.Character then return false end
+    
+    -- Dead body check
+    if not Utils.IsPlayerAlive(State.Aimbot.CurrentTarget) then
+        AimbotSystem.ReleaseTarget()
+        return false
+    end
+    
+    -- Wall check (if enabled)
+    if Config.Triggerbot.WallCheck and not Utils.IsTargetVisible(State.Aimbot.CurrentTarget) then
+        return false
+    end
+    
+    return true
+end
+
+-- Shooting methods
+local function ActivateTool(tool)
+    if not tool:FindFirstChild("Handle") then return false end
+    
+    tool:Activate()
+    if Config.Triggerbot.DoubleActivation then
+        task.spawn(function() tool:Activate() end)
+    end
+    return true
+end
+
+local function FireRemoteEvent(tool)
+    for _, descendant in ipairs(tool:GetDescendants()) do
+        if not descendant:IsA("RemoteEvent") then continue end
+        
+        local name = descendant.Name:lower()
+        for _, keyword in ipairs(REMOTE_KEYWORDS) do
+            if name:find(keyword) then
+                descendant:FireServer()
+                if Config.Triggerbot.DoubleActivation then
+                    task.spawn(function() descendant:FireServer() end)
+                end
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function FireBindableEvent(tool)
+    for _, descendant in ipairs(tool:GetDescendants()) do
+        if not descendant:IsA("BindableEvent") then continue end
+        
+        local name = descendant.Name:lower()
+        for _, keyword in ipairs(REMOTE_KEYWORDS) do
+            if name:find(keyword) then
+                descendant:Fire()
+                if Config.Triggerbot.DoubleActivation then
+                    task.spawn(function() descendant:Fire() end)
+                end
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function FireModuleScript(tool)
+    local module = nil
+    for _, name in ipairs(MODULE_NAMES) do
+        module = tool:FindFirstChild(name)
+        if module and module:IsA("ModuleScript") then break end
+        module = nil
+    end
+    
+    if not module then return false end
+    
+    local success, gunModule = pcall(require, module)
+    if not success or not gunModule then return false end
+    
+    for _, funcName in ipairs(MODULE_FUNCTIONS) do
+        if gunModule[funcName] then
+            gunModule[funcName](gunModule)
+            if Config.Triggerbot.DoubleActivation then
+                task.spawn(function() gunModule[funcName](gunModule) end)
+            end
+            return true
+        end
+    end
+    
+    return false
+end
+
+local function SimulateMouseClick()
+    if not mouse1press then return false end
+    
+    mouse1press()
+    task.wait(TRIGGERBOT_CONFIG.MinDelay)
+    mouse1release()
+    
+    if Config.Triggerbot.DoubleActivation then
+        task.spawn(function()
+            task.wait(TRIGGERBOT_CONFIG.BurstDelay)
+            mouse1press()
+            task.wait(TRIGGERBOT_CONFIG.MinDelay)
+            mouse1release()
+        end)
+    end
+    
+    return true
+end
+
+-- Main shooting logic
+local function AttemptShoot()
+    if not CanShoot() then return end
+    
+    local tool = Client.Character and Client.Character:FindFirstChildOfClass("Tool")
+    if not tool then 
+        if Config.Misc.Debug then
+            print("[Triggerbot] ❌ No tool equipped")
+        end
+        return 
+    end
+    
+    local methods = {
+        {name = "ActivateTool", func = ActivateTool},
+        {name = "FireRemoteEvent", func = FireRemoteEvent},
+        {name = "FireBindableEvent", func = FireBindableEvent},
+        {name = "FireModuleScript", func = FireModuleScript},
+        {name = "SimulateMouseClick", func = SimulateMouseClick}
+    }
+    
+    for _, method in ipairs(methods) do
+        if Config.Misc.Debug then
+            print("[Triggerbot] Trying method:", method.name)
+        end
+        
+        local success, result = pcall(function()
+            return method.func(tool)
+        end)
+        
+        if success and result then 
+            if Config.Misc.Debug then
+                print("[Triggerbot] ✅ SUCCESS using:", method.name)
+            end
+            break
+        elseif Config.Misc.Debug and not success then
+            print("[Triggerbot] ⚠️ Error in", method.name, ":", result)
+        end
+    end
+end
+
+-- Main loop (SIMPLE - Just shoots when locked)
+function TriggerbotSystem.Start()
+    task.spawn(function()
+        while true do
+            local delay = Config.Triggerbot.Delay / 1000
+            task.wait(delay)
+            
+            pcall(AttemptShoot)
+        end
+    end)
+end
+
+-- Initialize
+function TriggerbotSystem.Initialize()
+    TriggerbotSystem.Start()
+end
+
+-- ========================================
+-- SECTION 9: ESP SYSTEM
+-- ========================================
+local ESPSystem = {}
+
+-- Create ESP for player
+function ESPSystem.CreateESP(player)
+    if player == Client.Player then return end
+    if not player.Character then return end
+    
+    -- Clean up existing ESP
+    ESPSystem.RemoveESP(player)
+    
+    local espObjects = {}
+    
+    -- Highlight
+    local highlight = Instance.new("Highlight")
+    highlight.FillColor = Config.ESP.UseTeamColors and Utils.GetTeamColor(player) or Config.ESP.CustomColor
+    highlight.OutlineColor = Color3.fromRGB(0, 0, 0)
+    highlight.FillTransparency = 0.5
+    highlight.OutlineTransparency = 0
+    highlight.Parent = player.Character
+    table.insert(espObjects, highlight)
+    
+    -- Billboard (Name, Distance, Health)
+    if Config.ESP.ShowNames or Config.ESP.ShowDistance or Config.ESP.ShowHealth then
+        local head = player.Character:FindFirstChild("Head")
+        if head then
+            local billboard = Instance.new("BillboardGui")
+            billboard.Size = UDim2.new(0, 200, 0, 100)
+            billboard.StudsOffset = Vector3.new(0, 2, 0)
+            billboard.AlwaysOnTop = true
+            billboard.Parent = head
+            
+            local yOffset = 0
+            
+            -- Name
+            if Config.ESP.ShowNames then
+                local nameLabel = Instance.new("TextLabel")
+                nameLabel.BackgroundTransparency = 1
+                nameLabel.Position = UDim2.new(0, 0, 0, yOffset)
+                nameLabel.Size = UDim2.new(1, 0, 0, 20)
+                nameLabel.Font = Enum.Font.GothamBold
+                nameLabel.Text = player.Name
+                nameLabel.TextColor3 = Config.ESP.UseTeamColors and Utils.GetTeamColor(player) or Config.ESP.CustomColor
+                nameLabel.TextSize = 14
+                nameLabel.TextStrokeTransparency = 0.5
+                nameLabel.Parent = billboard
+                yOffset = yOffset + 20
+            end
+            
+            -- Health Bar
+            if Config.ESP.ShowHealth then
+                local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+                if humanoid then
+                    local healthBG = Instance.new("Frame")
+                    healthBG.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+                    healthBG.BorderSizePixel = 0
+                    healthBG.Position = UDim2.new(0.1, 0, 0, yOffset)
+                    healthBG.Size = UDim2.new(0.8, 0, 0, 8)
+                    healthBG.Parent = billboard
+                    
+                    local healthBar = Instance.new("Frame")
+                    healthBar.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
+                    healthBar.BorderSizePixel = 0
+                    healthBar.Size = UDim2.new(humanoid.Health / humanoid.MaxHealth, 0, 1, 0)
+                    healthBar.Parent = healthBG
+                    
+                    -- Update health bar
+                    task.spawn(function()
+                        while healthBar.Parent and player.Character do
+                            pcall(function()
+                                local healthPercent = humanoid.Health / humanoid.MaxHealth
+                                healthBar.Size = UDim2.new(healthPercent, 0, 1, 0)
+                                
+                                if healthPercent > 0.6 then
+                                    healthBar.BackgroundColor3 = Color3.fromRGB(100, 255, 100)
+                                elseif healthPercent > 0.3 then
+                                    healthBar.BackgroundColor3 = Color3.fromRGB(255, 200, 0)
+                                else
+                                    healthBar.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+                                end
+                            end)
+                            task.wait(0.1)
+                        end
+                    end)
+                    
+                    yOffset = yOffset + 12
+                end
+            end
+            
+            -- Distance
+            if Config.ESP.ShowDistance then
+                local distLabel = Instance.new("TextLabel")
+                distLabel.BackgroundTransparency = 1
+                distLabel.Position = UDim2.new(0, 0, 0, yOffset)
+                distLabel.Size = UDim2.new(1, 0, 0, 20)
+                distLabel.Font = Enum.Font.Gotham
+                distLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+                distLabel.TextSize = 12
+                distLabel.TextStrokeTransparency = 0.5
+                distLabel.Parent = billboard
+                
+                task.spawn(function()
+                    while distLabel.Parent and player.Character do
+                        pcall(function()
+                            if Client.Character and Client.Character:FindFirstChild("HumanoidRootPart") then
+                                local dist = Utils.GetDistance(
+                                    player.Character.HumanoidRootPart.Position,
+                                    Client.Character.HumanoidRootPart.Position
+                                )
+                                distLabel.Text = string.format("[%.0fm]", dist)
+                            end
+                        end)
+                        task.wait(0.2)
+                    end
+                end)
+            end
+            
+            table.insert(espObjects, billboard)
+        end
+    end
+    
+    -- Tracer
+    if Config.ESP.ShowTracers then
+        local tracer = Drawing.new("Line")
+        tracer.Visible = true
+        tracer.Color = Config.ESP.UseTeamColors and Utils.GetTeamColor(player) or Config.ESP.CustomColor
+        tracer.Thickness = 2
+        tracer.Transparency = 0.7
+        table.insert(espObjects, tracer)
+        
+        task.spawn(function()
+            while tracer and player.Character do
+                pcall(function()
+                    local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+                    if hrp then
+                        local screenPos, onScreen = Utils.WorldToScreen(hrp.Position)
+                        
+                        if onScreen then
+                            local startY
+                            if Config.ESP.TracerOrigin == "Top" then
+                                startY = 0
+                            elseif Config.ESP.TracerOrigin == "Middle" then
+                                startY = Client.Camera.ViewportSize.Y / 2
+                            else
+                                startY = Client.Camera.ViewportSize.Y
+                            end
+                            
+                            tracer.From = Vector2.new(Client.Camera.ViewportSize.X / 2, startY)
+                            tracer.To = screenPos
+                            tracer.Visible = true
+                        else
+                            tracer.Visible = false
+                        end
+                    end
+                end)
+                task.wait(0.05)
+            end
+        end)
+    end
+    
+    State.ESP.Objects[player] = espObjects
+end
+
+-- Remove ESP from player
+function ESPSystem.RemoveESP(player)
+    if State.ESP.Objects[player] then
+        for _, obj in pairs(State.ESP.Objects[player]) do
+            pcall(function()
+                if obj.Remove then
+                    obj:Remove()
+                else
+                    obj:Destroy()
+                end
+            end)
+        end
+        State.ESP.Objects[player] = nil
+    end
+end
+
+-- Update all ESP
+function ESPSystem.UpdateAll()
+    for _, player in pairs(Services.Players:GetPlayers()) do
+        if Config.ESP.Enabled and FilterSystem.PassesFilters(player) then
+            if not State.ESP.Objects[player] and player.Character then
+                ESPSystem.CreateESP(player)
+            end
+        else
+            ESPSystem.RemoveESP(player)
+        end
+    end
+end
+
+-- Initialize ESP system
+function ESPSystem.Initialize()
+    -- Player added/removed
+    Services.Players.PlayerAdded:Connect(function(player)
+        task.wait(1)
+        if Config.ESP.Enabled then
+            ESPSystem.CreateESP(player)
+        end
+    end)
+    
+    Services.Players.PlayerRemoving:Connect(function(player)
+        ESPSystem.RemoveESP(player)
+    end)
+    
+    -- Update loop
+    task.spawn(function()
+        while true do
+            task.wait(1)
+            ESPSystem.UpdateAll()
+        end
+    end)
+end
+
+-- ========================================
+-- SECTION 10: ANTI-AFK SYSTEM
+-- ========================================
+local AntiAFKSystem = {}
+
+function AntiAFKSystem.Initialize()
+    Client.Player.Idled:Connect(function()
+        if Config.AntiAFK.Enabled then
+            Services.VirtualUser:CaptureController()
+            Services.VirtualUser:ClickButton2(Vector2.new())
+        end
+    end)
+end
+
+-- ========================================
+-- SECTION 11: FOV SYSTEM
+-- ========================================
+local FOVSystem = {}
+
+function FOVSystem.Update()
+    if Config.FOV.Enabled then
+        Client.Camera.FieldOfView = Config.FOV.Value
+    else
+        Client.Camera.FieldOfView = 70
+    end
+end
+
+function FOVSystem.Initialize()
+    task.spawn(function()
+        while true do
+            task.wait(0.5)
+            FOVSystem.Update()
+        end
+    end)
+    
+    Client.Player.CharacterAdded:Connect(function()
+        task.wait(0.5)
+        FOVSystem.Update()
+    end)
+end
+
+-- ========================================
+-- SECTION 12: CONFIG SYSTEM
+-- ========================================
+local ConfigSystem = {}
+
+function ConfigSystem.Save()
+    local data = {
+        Aimbot = Config.Aimbot,
+        Triggerbot = Config.Triggerbot,
+        ESP = Config.ESP,
+        Filters = Config.Filters,
+        FOV = Config.FOV,
+        AntiAFK = Config.AntiAFK,
+    }
+    
+    pcall(function()
+        writefile("syntrix_v2_config.json", Services.HttpService:JSONEncode(data))
+    end)
+    
+    Utils.Notify("💾 Config Saved", "Settings saved successfully!", 2)
+end
+
+function ConfigSystem.Load()
+    local success, data = pcall(function()
+        return Services.HttpService:JSONDecode(readfile("syntrix_v2_config.json"))
+    end)
+    
+    if success and data then
+        Config.Aimbot = data.Aimbot or Config.Aimbot
+        Config.Triggerbot = data.Triggerbot or Config.Triggerbot
+        Config.ESP = data.ESP or Config.ESP
+        Config.Filters = data.Filters or Config.Filters
+        Config.FOV = data.FOV or Config.FOV
+        Config.AntiAFK = data.AntiAFK or Config.AntiAFK
+        
+        return true
+    end
+    return false
+end
+
+-- ========================================
+-- SECTION 13: WINDUI INTERFACE
+-- ========================================
+local function CreateInterface()
+    -- Load WindUI
+    local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+    -- Create Window
+    local Window = WindUI:CreateWindow({
+        Title = "Syntrix Aimbot V2",
+        Author = "by Syntrix Team",
+        Icon = "solar:target-bold",
+        Folder = "SyntrixV2",
+        Theme = "Midnight",
+        NewElements = true,
+        OpenButton = {
+            Title = "Open Syntrix V2",
+            CornerRadius = UDim.new(0.5, 0),
+            StrokeThickness = 2,
+            Enabled = true,
+            Draggable = true,
+            OnlyMobile = false,
+            Scale = 1,
+            Color = ColorSequence.new(
+                Color3.fromHex("#8B2BE2"),
+                Color3.fromHex("#4B0082")
+            )
+        },
+    })
+
+    -- Tags
+    Window:Tag({
+        Title = "v2.0",
+        Icon = "star",
+        Color = Color3.fromHex("#8B2BE2"),
+        Border = true,
+    })
+
+-- ========================================
+ -- AIMBOT TAB
+-- ========================================
+    local AimbotTab = Window:Tab({
+        Title = "Aimbot",
+        Icon = "solar:target-bold",
+    })
+
+    AimbotTab:Select()
+
+    AimbotTab:Section({
+        Title = "Core Settings",
+    })
+
+    AimbotTab:Toggle({
+        Flag = "AimbotEnabled",
+        Title = "Enable Aimbot",
+        Value = Config.Aimbot.Enabled,
+        Callback = function(value)
+            Config.Aimbot.Enabled = value
+        end,
+    })
+
+    AimbotTab:Dropdown({
+        Flag = "AimPart",
+        Title = "Target Part",
+        Values = {"Head", "HumanoidRootPart", "UpperTorso", "LowerTorso"},
+        Value = Config.Aimbot.TargetPart,
+        Callback = function(value)
+            Config.Aimbot.TargetPart = value
+        end,
+    })
+
+    AimbotTab:Slider({
+        Flag = "AimRadius",
+        Title = "Aim Radius",
+        IsTooltip = true,
+        Step = 5,
+        Value = {
+            Min = 10,
+            Max = 500,
+            Default = Config.Aimbot.Radius,
+        },
+        Callback = function(value)
+            Config.Aimbot.Radius = value
+        end
+    })
+
+    AimbotTab:Keybind({
+        Flag = "LockKey",
+        Title = "Lock Key",
+        Value = Config.Aimbot.LockKey,
+        Callback = function(key)
+            Config.Aimbot.LockKey = key
+        end
+    })
+
+    AimbotTab:Toggle({
+        Flag = "ShowFOV",
+        Title = "Show FOV Circle",
+        Value = Config.Aimbot.ShowFOV,
+        Callback = function(value)
+            Config.Aimbot.ShowFOV = value
+        end,
+    })
+
+    AimbotTab:Space()
+
+    AimbotTab:Section({
+        Title = "Prediction & Smoothing",
+    })
+
+    AimbotTab:Toggle({
+        Flag = "Prediction",
+        Title = "Enable Prediction",
+        Value = Config.Aimbot.Prediction,
+        Callback = function(value)
+            Config.Aimbot.Prediction = value
+        end,
+    })
+
+    AimbotTab:Slider({
+        Flag = "PredictionMultiplier",
+        Title = "Prediction Multiplier",
+        IsTooltip = true,
+        Step = 0.1,
+        Value = {
+            Min = 1,
+            Max = 20,
+            Default = Config.Aimbot.PredictionMultiplier,
+        },
+        Callback = function(value)
+            Config.Aimbot.PredictionMultiplier = value
+        end
+    })
+
+    AimbotTab:Toggle({
+        Flag = "Smoothing",
+        Title = "Enable Smoothing",
+        Value = Config.Aimbot.Smoothing,
+        Callback = function(value)
+            Config.Aimbot.Smoothing = value
+        end,
+    })
+
+    AimbotTab:Slider({
+        Flag = "SmoothAmount",
+        Title = "Smooth Amount",
+        IsTooltip = true,
+        Step = 0.01,
+        Value = {
+            Min = 0.01,
+            Max = 1,
+            Default = Config.Aimbot.SmoothAmount,
+        },
+        Callback = function(value)
+            Config.Aimbot.SmoothAmount = value
+        end
+    })
+
+    -- ========================================
+-- TRIGGERBOT TAB (FIXED ICON)
+-- ========================================
+local TriggerbotTab = Window:Tab({
+    Title = "Triggerbot",
+    Icon = "solar:play-circle-bold", -- ✅ FIXED: Icon now shows
+})
+
+TriggerbotTab:Section({
+    Title = "Triggerbot Settings",
+})
+
+TriggerbotTab:Toggle({
+    Flag = "TriggerbotEnabled",
+    Title = "Enable Triggerbot",
+    Value = Config.Triggerbot.Enabled,
+    Callback = function(value)
+        Config.Triggerbot.Enabled = value
+    end,
+})
+
+TriggerbotTab:Toggle({
+    Flag = "TriggerbotWallCheck",
+    Title = "Wall Check",
+    Desc = "Only shoot visible targets",
+    Value = Config.Triggerbot.WallCheck,
+    Callback = function(value)
+        Config.Triggerbot.WallCheck = value
+    end,
+})
+
+TriggerbotTab:Slider({
+    Flag = "TriggerbotDelay",
+    Title = "Fire Delay (ms)",
+    IsTooltip = true,
+    Step = 10,
+    Value = {
+        Min = 10,
+        Max = 500,
+        Default = Config.Triggerbot.Delay,
+    },
+    Callback = function(value)
+        Config.Triggerbot.Delay = value
+    end
+})
+
+TriggerbotTab:Toggle({
+    Flag = "DoubleActivation",
+    Title = "Double Activation",
+    Desc = "Fire twice per trigger (faster rate)",
+    Value = Config.Triggerbot.DoubleActivation,
+    Callback = function(value)
+        Config.Triggerbot.DoubleActivation = value
+    end,
+})
+
+    -- ========================================
+    -- ESP TAB
+    -- ========================================
+    local ESPTab = Window:Tab({
+        Title = "ESP",
+        Icon = "solar:eye-bold",
+    })
+
+    ESPTab:Section({
+        Title = "ESP Settings",
+    })
+
+    ESPTab:Toggle({
+        Flag = "ESPEnabled",
+        Title = "Enable ESP",
+        Value = Config.ESP.Enabled,
+        Callback = function(value)
+            Config.ESP.Enabled = value
+            ESPSystem.UpdateAll()
+        end,
+    })
+
+    ESPTab:Toggle({
+        Flag = "ShowNames",
+        Title = "Show Names",
+        Value = Config.ESP.ShowNames,
+        Callback = function(value)
+            Config.ESP.ShowNames = value
+            ESPSystem.UpdateAll()
+        end,
+    })
+
+    ESPTab:Toggle({
+        Flag = "ShowDistance",
+        Title = "Show Distance",
+        Value = Config.ESP.ShowDistance,
+        Callback = function(value)
+            Config.ESP.ShowDistance = value
+            ESPSystem.UpdateAll()
+        end,
+    })
+
+    ESPTab:Toggle({
+        Flag = "ShowHealth",
+        Title = "Show Health Bar",
+        Value = Config.ESP.ShowHealth,
+        Callback = function(value)
+            Config.ESP.ShowHealth = value
+            ESPSystem.UpdateAll()
+        end,
+    })
+
+    ESPTab:Toggle({
+        Flag = "ShowTracers",
+        Title = "Show Tracers",
+        Value = Config.ESP.ShowTracers,
+        Callback = function(value)
+            Config.ESP.ShowTracers = value
+            ESPSystem.UpdateAll()
+        end,
+    })
+
+    ESPTab:Dropdown({
+        Flag = "TracerOrigin",
+        Title = "Tracer Origin",
+        Values = {"Bottom", "Middle", "Top"},
+        Value = Config.ESP.TracerOrigin,
+        Callback = function(value)
+            Config.ESP.TracerOrigin = value
+        end,
+    })
+
+    ESPTab:Toggle({
+        Flag = "UseTeamColors",
+        Title = "Use Team Colors",
+        Value = Config.ESP.UseTeamColors,
+        Callback = function(value)
+            Config.ESP.UseTeamColors = value
+            ESPSystem.UpdateAll()
+        end,
+    })
+
+    -- ========================================
+    -- FILTERS TAB
+    -- ========================================
+    local FiltersTab = Window:Tab({
+        Title = "Filters",
+        Icon = "solar:filter-bold",
+    })
+
+    FiltersTab:Section({
+        Title = "Filter Settings",
+    })
+
+    FiltersTab:Toggle({
+        Flag = "TeamCheck",
+        Title = "Team Check",
+        Desc = "Ignore teammates",
+        Value = Config.Filters.TeamCheck,
+        Callback = function(value)
+            Config.Filters.TeamCheck = value
+        end,
+    })
+
+    FiltersTab:Space()
+
+    FiltersTab:Section({
+        Title = "Whitelist / Blacklist",
+    })
+
+    FiltersTab:Toggle({
+        Flag = "UseWhitelist",
+        Title = "Whitelist Mode",
+        Desc = "Only target whitelisted players",
+        Value = Config.Filters.UseWhitelist,
+        Callback = function(value)
+            Config.Filters.UseWhitelist = value
+        end,
+    })
+
+    FiltersTab:Space()
+
+    FiltersTab:Input({
+        Title = "Add to Whitelist",
+        Placeholder = "Enter player name",
+        Callback = function(username)
+            if username and username ~= "" then
+                Config.Filters.Whitelist[username] = true
+                WindUI:Notify({
+                    Title = "Whitelist Updated",
+                    Content = username .. " added to whitelist",
+                })
+            end
+        end
+    })
+
+    FiltersTab:Space()
+
+    FiltersTab:Input({
+        Title = "Add to Blacklist",
+        Placeholder = "Enter player name",
+        Callback = function(username)
+            if username and username ~= "" then
+                Config.Filters.Blacklist[username] = true
+                WindUI:Notify({
+                    Title = "Blacklist Updated",
+                    Content = username .. " added to blacklist",
+                })
+            end
+        end
+    })
+
+    FiltersTab:Space()
+
+    FiltersTab:Button({
+        Title = "Clear Whitelist",
+        Icon = "trash",
+        Justify = "Center",
+        Callback = function()
+            Config.Filters.Whitelist = {}
+            WindUI:Notify({
+                Title = "Whitelist Cleared",
+                Content = "All entries removed",
+            })
+        end
+    })
+
+    FiltersTab:Space()
+
+    FiltersTab:Button({
+        Title = "Clear Blacklist",
+        Icon = "trash",
+        Justify = "Center",
+        Callback = function()
+            Config.Filters.Blacklist = {}
+            WindUI:Notify({
+                Title = "Blacklist Cleared",
+                Content = "All entries removed",
+            })
+        end
+    })
+
+    -- ========================================
+    -- VISUALS TAB
+    -- ========================================
+    local VisualsTab = Window:Tab({
+        Title = "Visuals",
+        Icon = "solar:palette-bold",
+    })
+
+    VisualsTab:Section({
+        Title = "FOV Changer",
+    })
+
+    VisualsTab:Toggle({
+        Flag = "FOVEnabled",
+        Title = "Custom FOV",
+        Value = Config.FOV.Enabled,
+        Callback = function(value)
+            Config.FOV.Enabled = value
+            FOVSystem.Update()
+        end,
+    })
+
+    VisualsTab:Slider({
+        Flag = "FOVValue",
+        Title = "FOV Amount",
+        IsTooltip = true,
+        Step = 1,
+        Value = {
+            Min = 70,
+            Max = 120,
+            Default = Config.FOV.Value,
+        },
+        Icons = {
+            From = "solar:minimize-bold",
+            To = "solar:maximize-bold",
+        },
+        Callback = function(value)
+            Config.FOV.Value = value
+            FOVSystem.Update()
+        end
+    })
+
+    -- ========================================
+    -- SETTINGS TAB
+    -- ========================================
+    local SettingsTab = Window:Tab({
+        Title = "Settings",
+        Icon = "solar:settings-bold",
+    })
+
+    SettingsTab:Section({
+        Title = "Configuration",
+    })
+
+    SettingsTab:Space({ Columns = 2 })
+
+    local ConfigGroup = SettingsTab:Group()
+
+    ConfigGroup:Button({
+        Title = "Save Config",
+        Icon = "solar:save-bold",
+        Justify = "Center",
+        IconAlign = "Left",
+        Size = "Small",
+        Callback = function()
+            ConfigSystem.Save()
+        end,
+    })
+
+    ConfigGroup:Space({ Columns = 0.5 })
+
+    ConfigGroup:Button({
+        Title = "Load Config",
+        Icon = "solar:folder-bold",
+        Justify = "Center",
+        IconAlign = "Left",
+        Size = "Small",
+        Callback = function()
+            if ConfigSystem.Load() then
+                WindUI:Notify({
+                    Title = "Config Loaded",
+                    Content = "Settings restored successfully!",
+                })
+                ESPSystem.UpdateAll()
+                FOVSystem.Update()
+            else
+                WindUI:Notify({
+                    Title = "Load Failed",
+                    Content = "No config file found",
+                })
+            end
+        end,
+    })
+
+    SettingsTab:Space({ Columns = 1 })
+
+    SettingsTab:Section({
+        Title = "Miscellaneous",
+    })
+
+    SettingsTab:Toggle({
+        Flag = "AntiAFK",
+        Title = "Anti-AFK",
+        Desc = "Prevent auto-kick",
+        Value = Config.AntiAFK.Enabled,
+        Callback = function(value)
+            Config.AntiAFK.Enabled = value
+        end,
+    })
+
+    SettingsTab:Space({ Columns = 1 })
+
+    SettingsTab:Button({
+        Title = "Join Discord",
+        Icon = "solar:chat-bold",
+        Justify = "Center",
+        IconAlign = "Left",
+        Size = "Medium",
+        Callback = function()
+            setclipboard(Config.Misc.DiscordLink)
+            WindUI:Notify({
+                Title = "Discord Link Copied",
+                Content = "Paste it in your browser!",
+            })
+        end,
+    })
+
+    SettingsTab:Space({ Columns = 1 })
+
+    SettingsTab:Button({
+        Title = "Destroy UI",
+        Icon = "solar:trash-bin-trash-bold",
+        Justify = "Center",
+        Color = Color3.fromRGB(255, 80, 80),
+        Callback = function()
+            Window:Destroy()
+        end,
+    })
+
+    -- ========================================
+    -- ABOUT TAB
+    -- ========================================
+    local AboutTab = Window:Tab({
+        Title = "About",
+        Icon = "solar:info-square-bold",
+    })
+
+    AboutTab:Section({
+        Title = "Syntrix Aimbot V2.0",
+        TextSize = 24,
+        FontWeight = Enum.FontWeight.Bold,
+    })
+
+    AboutTab:Space()
+
+    AboutTab:Section({
+        Title = "Complete rewrite with modern architecture.\n\n✨ Features:\n• Universal Aimbot\n• ESP System\n• Triggerbot with Wall Check\n• Whitelist/Blacklist\n• FOV Controls\n• Config System\n\n🎨 Clean WindUI Interface\n🔧 Modular & Extensible\n⚡ Performance Optimized",
+        TextSize = 16,
+        TextTransparency = 0.3,
+    })
+
+    AboutTab:Space({ Columns = 2 })
+
+    AboutTab:Button({
+        Title = "Copy Discord Link",
+        Icon = "copy",
+        Justify = "Center",
+        Callback = function()
+            setclipboard(Config.Misc.DiscordLink)
+            WindUI:Notify({
+                Title = "Link Copied",
+                Content = "Discord link copied to clipboard",
+            })
+        end
+    })
+end
+
+-- ========================================
+-- SECTION 14: INITIALIZATION
+-- ========================================
+local function Initialize()
+    -- Load saved config
+    ConfigSystem.Load()
+    -- Initialize systems
+    AimbotSystem.Initialize()
+    TriggerbotSystem.Initialize()
+    ESPSystem.Initialize()
+    AntiAFKSystem.Initialize()
+    FOVSystem.Initialize()
+
+    -- Create UI
+    CreateInterface()
+
+    -- Success notification
+    Utils.Notify("🎯 Syntrix V2 Loaded", "All systems initialized!", 3)
+
+    print("========================================")
+    print("SYNTRIX AIMBOT V2.0 - LOADED")
+    print("Architecture: Modular & Extensible")
+    print("UI: WindUI with Purple/Black Theme")
+    print("========================================")
+end
+
+-- ========================================
+-- START SCRIPT
+-- ========================================
+Initialize()
