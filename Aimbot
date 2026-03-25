@@ -1,12 +1,12 @@
--- [[
-    Open Source Release
+--[[
+Open Source Release
 
-    This is an old project released for educational purposes.
-    Not maintained and not part of Velaware.
+This is an old project released for educational purposes.
+Not maintained and not part of Velaware.
 
-    You are free to use, modify, and share this code.
+You are free to use, modify, and share this code.
 
-    No warranty or support is provided.
+No warranty or support is provided.
 ]]
 
 local Services = {
